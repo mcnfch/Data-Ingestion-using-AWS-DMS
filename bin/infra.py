@@ -80,8 +80,11 @@ def create_security_group_for_sqlserver(instance_id, region='us-east-1'):
         
         security_group_id = sg_response['GroupId']
         
-        # Add inbound rule for SQL Server (port 1433)
-        logger.info(f"Adding SQL Server port 1433 access for {current_ip}")
+        # Get VPC CIDR block for DMS access
+        vpc_cidr = vpc_response['Vpcs'][0]['CidrBlock']
+        
+        # Add inbound rules for SQL Server (port 1433)
+        logger.info(f"Adding SQL Server port 1433 access for current IP ({current_ip}) and VPC CIDR ({vpc_cidr})")
         ec2_client.authorize_security_group_ingress(
             GroupId=security_group_id,
             IpPermissions=[
@@ -89,7 +92,10 @@ def create_security_group_for_sqlserver(instance_id, region='us-east-1'):
                     'IpProtocol': 'tcp',
                     'FromPort': 1433,
                     'ToPort': 1433,
-                    'IpRanges': [{'CidrIp': cidr_block, 'Description': 'SQL Server access'}]
+                    'IpRanges': [
+                        {'CidrIp': cidr_block, 'Description': 'SQL Server access'},
+                        {'CidrIp': vpc_cidr, 'Description': 'DMS replication instance access'}
+                    ]
                 }
             ]
         )
@@ -126,8 +132,43 @@ def ensure_sqlserver_access(security_group_id, region='us-east-1'):
                 break
         
         if has_sqlserver_access:
-            logger.info("Security group already has SQL Server port 1433 access")
-            return
+            logger.info("Security group already has SQL Server port 1433 access - checking for VPC CIDR access...")
+            
+            # Check if VPC CIDR access exists
+            vpc_response = ec2_client.describe_vpcs(
+                Filters=[{'Name': 'isDefault', 'Values': ['true']}]
+            )
+            vpc_cidr = vpc_response['Vpcs'][0]['CidrBlock']
+            
+            has_vpc_access = False
+            for rule in security_group['IpPermissions']:
+                if (rule.get('IpProtocol') == 'tcp' and 
+                    rule.get('FromPort') == 1433 and 
+                    rule.get('ToPort') == 1433):
+                    for ip_range in rule.get('IpRanges', []):
+                        if ip_range.get('CidrIp') == vpc_cidr:
+                            has_vpc_access = True
+                            break
+                    if has_vpc_access:
+                        break
+            
+            if has_vpc_access:
+                logger.info("Security group already has VPC CIDR access for DMS")
+                return
+            else:
+                logger.info(f"Adding VPC CIDR access ({vpc_cidr}) for DMS replication instance")
+                ec2_client.authorize_security_group_ingress(
+                    GroupId=security_group_id,
+                    IpPermissions=[
+                        {
+                            'IpProtocol': 'tcp',
+                            'FromPort': 1433,
+                            'ToPort': 1433,
+                            'IpRanges': [{'CidrIp': vpc_cidr, 'Description': 'DMS replication instance access (auto-added)'}]
+                        }
+                    ]
+                )
+                return
         
         # Get current public IP
         import requests
@@ -138,8 +179,14 @@ def ensure_sqlserver_access(security_group_id, region='us-east-1'):
             logger.warning("Could not detect current IP, using 0.0.0.0/0 (not recommended for production)")
             cidr_block = "0.0.0.0/0"
         
-        # Add SQL Server port rule
-        logger.info(f"Adding SQL Server port 1433 access for {current_ip} to security group {security_group_id}")
+        # Get VPC CIDR for DMS access
+        vpc_response = ec2_client.describe_vpcs(
+            Filters=[{'Name': 'isDefault', 'Values': ['true']}]
+        )
+        vpc_cidr = vpc_response['Vpcs'][0]['CidrBlock']
+        
+        # Add SQL Server port rules
+        logger.info(f"Adding SQL Server port 1433 access for current IP ({current_ip}) and VPC CIDR ({vpc_cidr}) to security group {security_group_id}")
         ec2_client.authorize_security_group_ingress(
             GroupId=security_group_id,
             IpPermissions=[
@@ -147,7 +194,10 @@ def ensure_sqlserver_access(security_group_id, region='us-east-1'):
                     'IpProtocol': 'tcp',
                     'FromPort': 1433,
                     'ToPort': 1433,
-                    'IpRanges': [{'CidrIp': cidr_block, 'Description': 'SQL Server access (auto-added)'}]
+                    'IpRanges': [
+                        {'CidrIp': cidr_block, 'Description': 'SQL Server access (auto-added)'},
+                        {'CidrIp': vpc_cidr, 'Description': 'DMS replication instance access (auto-added)'}
+                    ]
                 }
             ]
         )

@@ -6,7 +6,6 @@ Main orchestration script with terminal panel interface.
 
 import os
 import sys
-import argparse
 import time
 import threading
 import json
@@ -630,7 +629,10 @@ class DeploymentManager:
             
             # Start migration
             self.ui.log("Starting data migration...")
-            start_migration(self.config['migration_task_id'])
+            migration_success = start_migration(self.config['migration_task_id'], self.config['aws_region'])
+            
+            if not migration_success:
+                raise Exception("Migration task failed to complete successfully")
             
             self.ui.update_task_status('dms', TaskStatus.SUCCESS, region=self.config['aws_region'])
             self.ui.log("DMS migration completed successfully!")
@@ -684,29 +686,10 @@ class DeploymentManager:
             self.ui.log(f"Validation failed: {str(e)}")
             raise
 
-def run_deployment_with_ui(phase: str):
+def run_deployment_with_ui():
     """Run deployment with terminal UI."""
     ui = DeploymentUI()
     manager = DeploymentManager(ui)
-    
-    # Mark skipped phases
-    if phase == 'infra':
-        ui.update_task_status('db_init', TaskStatus.SKIPPED)
-        ui.update_task_status('dms', TaskStatus.SKIPPED) 
-        ui.update_task_status('validate', TaskStatus.SKIPPED)
-    elif phase == 'db':
-        ui.update_task_status('infra', TaskStatus.SKIPPED)
-        ui.update_task_status('dms', TaskStatus.SKIPPED)
-        ui.update_task_status('validate', TaskStatus.SKIPPED)
-    elif phase == 'dms':
-        ui.update_task_status('infra', TaskStatus.SKIPPED)
-        ui.update_task_status('db_init', TaskStatus.SKIPPED)
-        ui.update_task_status('validate', TaskStatus.SKIPPED)
-    elif phase == 'validate':
-        ui.update_task_status('infra', TaskStatus.SKIPPED)
-        ui.update_task_status('db_init', TaskStatus.SKIPPED)
-        ui.update_task_status('dms', TaskStatus.SKIPPED)
-    
     
     success = True
     
@@ -716,21 +699,17 @@ def run_deployment_with_ui(phase: str):
             ui.log("Starting AWS DMS Data Ingestion Deployment")
             ui.log(f"Configuration loaded for AWS Account: {manager.config['aws_account_id']}")
             
-            if phase in ['infra', 'all']:
-                manager.deploy_infrastructure()
-                time.sleep(1)  # Brief pause for UI update
+            manager.deploy_infrastructure()
+            time.sleep(1)  # Brief pause for UI update
             
-            if phase in ['db', 'all']:
-                manager.initialize_database()
-                time.sleep(1)
+            manager.initialize_database()
+            time.sleep(1)
             
-            if phase in ['dms', 'all']:
-                manager.setup_dms_migration()
-                time.sleep(1)
+            manager.setup_dms_migration()
+            time.sleep(1)
             
-            if phase in ['validate', 'all']:
-                manager.validate_deployment()
-                time.sleep(1)
+            manager.validate_deployment()
+            time.sleep(1)
             
             ui.log("🎉 Deployment completed successfully!")
             ui.log("Check the S3 bucket for migrated data files.")
@@ -771,17 +750,12 @@ def run_deployment_with_ui(phase: str):
 
 def main():
     """Main deployment function."""
-    parser = argparse.ArgumentParser(description='Deploy AWS DMS Data Ingestion Pipeline')
-    parser.add_argument('--phase', choices=['infra', 'db', 'dms', 'validate', 'all'], 
-                       default='all', help='Deployment phase to run')
-    args = parser.parse_args()
-    
     # Setup basic logging for main function errors
     log_file = Path(__file__).parent / 'deployment.log'
     main_logger = logging.getLogger('main')
     
     try:
-        success = run_deployment_with_ui(args.phase)
+        success = run_deployment_with_ui()
         sys.exit(0 if success else 1)
         
     except KeyboardInterrupt:

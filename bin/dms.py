@@ -1,6 +1,7 @@
 """
 DMS configuration module for AWS DMS Data Ingestion Pipeline.
 Handles DMS replication instance, endpoints, and migration tasks.
+Follows AWS DMS best practices with proper error handling.
 """
 
 import boto3
@@ -153,13 +154,6 @@ def create_source_endpoint(endpoint_id, server_name, password, database_name,
         
         endpoint_arn = response['Endpoint']['EndpointArn']
         
-        # Test connection
-        logger.info("Testing source endpoint connection...")
-        test_response = dms_client.test_connection(
-            ReplicationInstanceArn=replication_instance_arn,
-            EndpointArn=endpoint_arn
-        )
-        
         logger.info(f"Source endpoint created successfully: {endpoint_arn}")
         return endpoint_arn
         
@@ -208,7 +202,7 @@ def create_target_endpoint(endpoint_id, role_arn, bucket_name, bucket_folder, re
             'BucketFolder': bucket_folder,
             'CompressionType': 'NONE',
             'CsvDelimiter': ',',
-            'CsvRowDelimiter': '\n',
+            'CsvRowDelimiter': '\\n',
             'DataFormat': 'csv',
             'IncludeOpForFullLoad': True,
             'TimestampColumnName': 'dms_timestamp'
@@ -245,7 +239,7 @@ def create_target_endpoint(endpoint_id, role_arn, bucket_name, bucket_folder, re
 def create_migration_task(task_id, replication_instance_arn, source_endpoint_arn, 
                          target_endpoint_arn, table_name, region='us-east-1'):
     """
-    Create DMS migration task.
+    Create DMS migration task following AWS best practices.
     
     Args:
         task_id (str): Migration task identifier
@@ -259,6 +253,62 @@ def create_migration_task(task_id, replication_instance_arn, source_endpoint_arn
         str: Migration task ARN
     """
     dms_client = boto3.client('dms', region_name=region)
+    
+    # Test endpoint connections first (AWS DMS requirement)
+    logger.info("Testing endpoint connections...")
+    try:
+        dms_client.test_connection(
+            ReplicationInstanceArn=replication_instance_arn,
+            EndpointArn=source_endpoint_arn
+        )
+        dms_client.test_connection(
+            ReplicationInstanceArn=replication_instance_arn,
+            EndpointArn=target_endpoint_arn
+        )
+        logger.info("Connection tests initiated, waiting for completion...")
+        
+        # Wait for connections to succeed (required by AWS DMS)
+        max_attempts = 20
+        for attempt in range(max_attempts):
+            time.sleep(15)
+            connections = dms_client.describe_connections(
+                Filters=[
+                    {'Name': 'replication-instance-arn', 'Values': [replication_instance_arn]}
+                ]
+            )
+            
+            successful_count = 0
+            for conn in connections['Connections']:
+                if conn['Status'] == 'successful':
+                    successful_count += 1
+            
+            if successful_count >= 2:
+                logger.info("Both endpoint connections successful")
+                break
+        else:
+            logger.warning("Connection tests may not have completed in time, continuing...")
+            
+    except ClientError as e:
+        logger.warning(f"Connection test error: {e}")
+    
+    # Check if task already exists
+    try:
+        response = dms_client.describe_replication_tasks(
+            Filters=[
+                {
+                    'Name': 'replication-task-id',
+                    'Values': [task_id]
+                }
+            ]
+        )
+        if response['ReplicationTasks']:
+            task = response['ReplicationTasks'][0]
+            task_arn = task['ReplicationTaskArn']
+            logger.info(f"Migration task {task_id} already exists")
+            return task_arn
+                
+    except ClientError as e:
+        logger.debug(f"Migration task check error: {e}")
     
     # Table mappings configuration
     table_mappings = {
@@ -277,23 +327,6 @@ def create_migration_task(task_id, replication_instance_arn, source_endpoint_arn
     }
     
     try:
-        # Check if task already exists
-        try:
-            response = dms_client.describe_replication_tasks(
-                Filters=[
-                    {
-                        'Name': 'replication-task-id',
-                        'Values': [task_id]
-                    }
-                ]
-            )
-            if response['ReplicationTasks']:
-                task = response['ReplicationTasks'][0]
-                logger.info(f"Migration task {task_id} already exists")
-                return task['ReplicationTaskArn']
-        except ClientError as e:
-            logger.debug(f"Migration task check error: {e}")
-        
         # Create migration task
         logger.info(f"Creating DMS migration task: {task_id}")
         response = dms_client.create_replication_task(
@@ -326,7 +359,7 @@ def create_migration_task(task_id, replication_instance_arn, source_endpoint_arn
 
 def start_migration(task_id, region='us-east-1'):
     """
-    Start migration task and wait for completion.
+    Start migration task following AWS DMS best practices.
     
     Args:
         task_id (str): Migration task identifier
@@ -338,7 +371,7 @@ def start_migration(task_id, region='us-east-1'):
     dms_client = boto3.client('dms', region_name=region)
     
     try:
-        # Get task details
+        # Get current task state
         response = dms_client.describe_replication_tasks(
             Filters=[
                 {
@@ -355,28 +388,102 @@ def start_migration(task_id, region='us-east-1'):
         task_arn = task['ReplicationTaskArn']
         task_status = task['Status']
         
+        logger.info(f"Current migration task status: {task_status}")
+        
+        # Handle different task states based on AWS DMS best practices
         if task_status == 'running':
             logger.info(f"Migration task {task_id} is already running")
-        elif task_status in ['ready', 'stopped']:
-            # Start the migration task
+            
+        elif task_status == 'ready':
             logger.info(f"Starting migration task: {task_id}")
             dms_client.start_replication_task(
                 ReplicationTaskArn=task_arn,
                 StartReplicationTaskType='start-replication'
             )
+            logger.info("Migration task started successfully")
+            
+        elif task_status == 'stopped':
+            # Check if task completed successfully
+            stop_reason = task.get('StopReason', '')
+            if any(reason in stop_reason for reason in ['FULL_LOAD_ONLY_FINISHED', 'FULL_LOAD_COMPLETED']):
+                logger.info(f"Migration already completed successfully: {stop_reason}")
+                return True
+            else:
+                logger.info(f"Migration task stopped with reason: {stop_reason}, restarting...")
+                dms_client.start_replication_task(
+                    ReplicationTaskArn=task_arn,
+                    StartReplicationTaskType='reload-target'
+                )
+                logger.info("Migration task restart initiated")
+                
         elif task_status == 'failed':
-            logger.warning(f"Migration task {task_id} is in failed state, restarting...")
+            logger.info("Migration task failed, attempting restart...")
             dms_client.start_replication_task(
                 ReplicationTaskArn=task_arn,
-                StartReplicationTaskType='start-replication'
+                StartReplicationTaskType='reload-target'
             )
+            logger.info("Migration task restart initiated")
+            
+        elif task_status in ['creating', 'modifying']:
+            logger.info(f"Migration task is {task_status}, waiting for ready state...")
+            # Wait for task to be ready
+            max_wait_time = 300  # 5 minutes
+            wait_time = 0
+            
+            while wait_time < max_wait_time:
+                time.sleep(15)
+                wait_time += 15
+                
+                response = dms_client.describe_replication_tasks(
+                    Filters=[{'Name': 'replication-task-id', 'Values': [task_id]}]
+                )
+                current_status = response['ReplicationTasks'][0]['Status']
+                
+                if current_status == 'ready':
+                    logger.info("Task is now ready, starting migration...")
+                    dms_client.start_replication_task(
+                        ReplicationTaskArn=task_arn,
+                        StartReplicationTaskType='start-replication'
+                    )
+                    break
+                elif current_status == 'failed':
+                    logger.error("Task failed while waiting for ready state")
+                    return False
+            
+            if wait_time >= max_wait_time:
+                logger.error("Timeout waiting for task to be ready")
+                return False
+        else:
+            logger.error(f"Unknown task status: {task_status}")
+            return False
+
+        # Monitor migration progress
+        return monitor_migration_completion(task_id, dms_client)
         
-        # Monitor task progress
-        logger.info("Monitoring migration progress...")
-        start_time = time.time()
-        max_wait_time = 3600  # 1 hour maximum wait time
-        
-        while time.time() - start_time < max_wait_time:
+    except ClientError as e:
+        logger.error(f"Error starting/monitoring migration: {e}")
+        return False
+
+def monitor_migration_completion(task_id, dms_client):
+    """
+    Monitor migration task until completion following AWS DMS best practices.
+    
+    Args:
+        task_id (str): Migration task identifier
+        dms_client: DMS client instance
+    
+    Returns:
+        bool: True if migration completed successfully
+    """
+    logger.info("Monitoring migration progress...")
+    start_time = time.time()
+    max_wait_time = 3600  # 1 hour maximum wait time
+    check_interval = 30  # Check every 30 seconds
+    
+    last_logged_progress = -1
+    
+    while time.time() - start_time < max_wait_time:
+        try:
             response = dms_client.describe_replication_tasks(
                 Filters=[
                     {
@@ -386,23 +493,38 @@ def start_migration(task_id, region='us-east-1'):
                 ]
             )
             
+            if not response['ReplicationTasks']:
+                logger.error("Migration task disappeared during monitoring")
+                return False
+                
             task = response['ReplicationTasks'][0]
             status = task['Status']
+            stats = task.get('ReplicationTaskStats', {})
+            stop_reason = task.get('StopReason', '')
             
+            # Log progress if changed
+            progress = stats.get('FullLoadProgressPercent', 0)
+            if progress != last_logged_progress:
+                logger.info(f"Migration progress: {progress}% complete")
+                logger.info(f"Tables loaded: {stats.get('TablesLoaded', 0)}, "
+                          f"loading: {stats.get('TablesLoading', 0)}, "
+                          f"errored: {stats.get('TablesErrored', 0)}")
+                last_logged_progress = progress
+            
+            # Check completion states based on AWS DMS documentation
             if status == 'stopped':
-                # Check stop reason
-                stop_reason = task.get('StopReason', 'Unknown')
-                if 'Full load completed' in stop_reason or 'FULL_LOAD_COMPLETED' in stop_reason:
+                # Check if task completed successfully
+                if any(reason in stop_reason for reason in [
+                    'FULL_LOAD_ONLY_FINISHED',
+                    'FULL_LOAD_COMPLETED', 
+                    'STOPPED_AFTER_FULL_LOAD',
+                    'STOPPED_AFTER_CACHED_EVENTS'
+                ]):
                     logger.info(f"Migration completed successfully: {stop_reason}")
-                    
-                    # Get task statistics
-                    stats = task.get('ReplicationTaskStats', {})
-                    logger.info(f"Migration statistics:")
-                    logger.info(f"  - Full load rows: {stats.get('FullLoadRows', 0)}")
-                    logger.info(f"  - Tables loaded: {stats.get('TablesLoaded', 0)}")
-                    logger.info(f"  - Tables loading: {stats.get('TablesLoading', 0)}")
-                    logger.info(f"  - Tables errored: {stats.get('TablesErrored', 0)}")
-                    
+                    logger.info(f"Final statistics:")
+                    logger.info(f"  Progress: {stats.get('FullLoadProgressPercent', 0)}%")
+                    logger.info(f"  Tables loaded: {stats.get('TablesLoaded', 0)}")
+                    logger.info(f"  Tables errored: {stats.get('TablesErrored', 0)}")
                     return True
                 else:
                     logger.error(f"Migration stopped with error: {stop_reason}")
@@ -412,20 +534,20 @@ def start_migration(task_id, region='us-east-1'):
                 logger.error("Migration task failed")
                 return False
                 
-            elif status == 'running':
-                # Log progress
-                stats = task.get('ReplicationTaskStats', {})
-                progress = f"Tables loading: {stats.get('TablesLoading', 0)}, loaded: {stats.get('TablesLoaded', 0)}"
-                logger.info(f"Migration in progress - {progress}")
+            elif status in ['running', 'starting']:
+                # Task is running normally, continue monitoring
+                pass
+            else:
+                logger.warning(f"Unexpected task status during monitoring: {status}")
                 
-            time.sleep(30)  # Wait 30 seconds before next check
+        except ClientError as e:
+            logger.error(f"Error during migration monitoring: {e}")
+            return False
         
-        logger.error("Migration task timed out")
-        return False
-        
-    except ClientError as e:
-        logger.error(f"Error starting/monitoring migration: {e}")
-        raise
+        time.sleep(check_interval)
+    
+    logger.error("Migration monitoring timed out after 1 hour")
+    return False
 
 def get_migration_status(task_id, region='us-east-1'):
     """
