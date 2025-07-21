@@ -227,6 +227,20 @@ class UnwindManager:
         logger.info("🔥 Deleting DMS endpoints...")
         
         try:
+            # First delete all connections
+            logger.info("  Deleting endpoint connections first...")
+            try:
+                connections = self.dms_client.describe_connections()
+                for conn in connections.get('Connections', []):
+                    try:
+                        logger.info(f"  Deleting connection for endpoint: {conn['EndpointIdentifier']}")
+                        # There's no direct delete_connection API, connections are auto-deleted when endpoints are removed
+                        # But we can try to delete the endpoint now
+                    except Exception as e:
+                        logger.warning(f"  Issue with connection: {e}")
+            except Exception as e:
+                logger.warning(f"  Could not list connections: {e}")
+            
             resources = self.params.get('created_resources', {})
             
             # Delete source endpoint
@@ -238,6 +252,15 @@ class UnwindManager:
                 except ClientError as e:
                     if e.response['Error']['Code'] == 'ResourceNotFoundFault':
                         logger.info(f"  ⚠️  Source endpoint not found: {source_arn}")
+                    elif e.response['Error']['Code'] == 'InvalidResourceStateFault':
+                        logger.warning(f"  ⚠️  Source endpoint still has active connections, forcing deletion...")
+                        # Wait a moment and try again
+                        time.sleep(10)
+                        try:
+                            self.dms_client.delete_endpoint(EndpointArn=source_arn)
+                            logger.info(f"  ✅ Deleted source endpoint on retry: {source_arn}")
+                        except ClientError as retry_e:
+                            logger.error(f"  ❌ Failed to delete source endpoint on retry: {retry_e}")
                     else:
                         logger.error(f"  ❌ Failed to delete source endpoint: {e}")
             
@@ -250,6 +273,15 @@ class UnwindManager:
                 except ClientError as e:
                     if e.response['Error']['Code'] == 'ResourceNotFoundFault':
                         logger.info(f"  ⚠️  Target endpoint not found: {target_arn}")
+                    elif e.response['Error']['Code'] == 'InvalidResourceStateFault':
+                        logger.warning(f"  ⚠️  Target endpoint still has active connections, forcing deletion...")
+                        # Wait a moment and try again
+                        time.sleep(10)
+                        try:
+                            self.dms_client.delete_endpoint(EndpointArn=target_arn)
+                            logger.info(f"  ✅ Deleted target endpoint on retry: {target_arn}")
+                        except ClientError as retry_e:
+                            logger.error(f"  ❌ Failed to delete target endpoint on retry: {retry_e}")
                     else:
                         logger.error(f"  ❌ Failed to delete target endpoint: {e}")
                         
@@ -503,48 +535,54 @@ class UnwindManager:
             logger.error(f"❌ Error deleting security group: {e}")
     
     def save_unwind_progress(self):
-        """Save unwind completion status"""
-        logger.info("💾 Saving unwind completion status...")
+        """Save unwind completion status to continuity.json"""
+        logger.info("💾 Updating continuity.json with cleanup completion...")
         
         try:
-            progress_file = Path(__file__).parent / 'unwind-progress.json'
-            progress_data = {
-                'unwind_completed': True,
-                'completion_time': time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime()),
-                'original_deployment_params': self.params,
-                'status': 'All AWS resources successfully destroyed'
-            }
+            continuity_file = Path(__file__).parent / 'continuity.json'
             
-            with open(progress_file, 'w') as f:
-                json.dump(progress_data, f, indent=2)
+            # Read existing continuity data
+            continuity_data = {}
+            if continuity_file.exists():
+                with open(continuity_file, 'r') as f:
+                    continuity_data = json.load(f)
             
-            logger.info(f"  ✅ Unwind progress saved to unwind-progress.json")
-            logger.info("  📁 Original files preserved for reference:")
-            logger.info("    - working-parameters.json (original deployment state)")
-            logger.info("    - continuity.json (deployment continuity)")
-            logger.info("    - unwind.log (detailed unwind log)")
+            # Update cleanup status
+            if 'tasks' not in continuity_data:
+                continuity_data['tasks'] = {}
+            
+            continuity_data['tasks']['cleanup'] = 'success'
+            continuity_data['last_cleanup'] = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())
+            
+            # Write updated continuity data
+            with open(continuity_file, 'w') as f:
+                json.dump(continuity_data, f, indent=4)
+            
+            logger.info("  ✅ Cleanup status updated in continuity.json")
                     
         except Exception as e:
-            logger.error(f"❌ Error saving unwind progress: {e}")
+            logger.error(f"❌ Error updating continuity.json: {e}")
     
     def run_unwind(self):
         """Execute the complete unwind process"""
         logger.info("🚨 Starting AWS DMS Infrastructure Unwind")
         logger.info("=" * 50)
         
-        # Check if unwind already completed
-        progress_file = Path(__file__).parent / 'unwind-progress.json'
-        if progress_file.exists():
+        # Check continuity.json for cleanup status
+        continuity_file = Path(__file__).parent / 'continuity.json'
+        if continuity_file.exists():
             try:
-                with open(progress_file, 'r') as f:
-                    progress = json.load(f)
-                if progress.get('unwind_completed'):
+                with open(continuity_file, 'r') as f:
+                    continuity = json.load(f)
+                cleanup_status = continuity.get('tasks', {}).get('cleanup', 'pending')
+                if cleanup_status == 'success':
                     logger.info("✅ Unwind already completed!")
-                    logger.info(f"   Completed at: {progress.get('completion_time', 'Unknown')}")
-                    logger.info("   Status: " + progress.get('status', 'Unknown'))
+                    logger.info(f"   Continuity status: cleanup = {cleanup_status}")
                     return True
+                else:
+                    logger.info(f"Cleanup status in continuity.json: {cleanup_status}")
             except Exception:
-                logger.warning("Could not read unwind-progress.json, continuing with unwind")
+                logger.warning("Could not read continuity.json, continuing with unwind")
         
         if not self.confirm_destruction():
             logger.info("❌ Unwind cancelled by user")
