@@ -1,0 +1,37 @@
+{
+  "tasks": {
+    "infra": {
+      "status": "success",
+      "timestamp": "2025-07-21T10:30:00Z",
+      "duration": 180.5,
+      "resources_created": [
+        "rds-instance", 
+        "s3-bucket",
+        "iam-role"
+      ]
+    },
+    "db_init": {
+      "status": "success", 
+      "timestamp": "2025-07-21T10:33:30Z",
+      "duration": 15.2,
+      "records_inserted": 5
+    },
+    "dms": {
+      "status": "success",
+      "timestamp": "2025-07-21T10:38:45Z", 
+      "duration": 245.8,
+      "migration_task_arn": "arn:aws:dms:us-east-1:123456789012:task:ABCD123456"
+    },
+    "validate": {
+      "status": "success",
+      "timestamp": "2025-07-21T10:42:15Z",
+      "duration": 45.3,
+      "validation_passed": true,
+      "source_rows": 5,
+      "target_rows": 5
+    }
+  },
+  "deployment_id": "deployment-2025-07-21-103000",
+  "last_updated": "2025-07-21T10:42:15Z",
+  "total_duration": 486.8
+}

@@ -1,0 +1,54 @@
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+deployment.log
+
+# Configuration files with secrets
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# AWS
+.aws/
+aws-exports.js
+
+# Node.js (in www folder)
+www/node_modules/
+www/.next/
+www/out/
+www/npm-debug.log*
+www/yarn-debug.log*
+www/yarn-error.log*
+
+# Python cache (in bin folder)  
+bin/__pycache__/
+bin/*.pyc
+bin/.env
+bin/.venv
+
+# Runtime data files
+bin/continuity.json
+bin/working-parameters.json
+
+# Exclude docs folder
+docs/
+
+# Windsurf rules
+.windsurfrules

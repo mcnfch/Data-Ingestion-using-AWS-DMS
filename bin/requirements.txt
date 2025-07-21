@@ -1,0 +1,23 @@
+# AWS DMS Data Ingestion Pipeline Dependencies
+
+# AWS SDK
+boto3>=1.34.0
+botocore>=1.34.0
+
+# Database connectivity
+pyodbc>=4.0.39
+
+# Data processing
+pandas>=2.0.0
+
+# Environment management
+python-dotenv>=1.0.0
+
+# Terminal UI and enhanced display
+rich>=13.7.0
+
+# HTTP requests for IP detection
+requests>=2.31.0
+
+# Optional: For enhanced logging and debugging
+colorama>=0.4.6
